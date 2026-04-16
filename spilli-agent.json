@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "runtimeApiVersion": 1,
+  "agent": {
+    "id": "spilli-coder",
+    "name": "Spilli Code Agent",
+    "apiVersion": 1,
+    "loopEntry": "agentLoop.js",
+    "description": "Coding agent runtime backed by spilli"
+  },
+  "localToolEntries": [
+    "tools/agent-tooling/tools/ideTools.js",
+    "tools/agent-tooling/tools/workspaceTools.js",
+    "tools/agent-tooling/tools/containerTools.js"
+  ],
+  "toolDeps": []
+}
