@@ -229,3 +229,101 @@ test('container.exec apply_patch add-file reuses cwd directories instead of crea
     /ENOENT/
   );
 });
+
+test('agent loop converts tool timeout into tool failure and continues iteration', async () => {
+  const priorTimeout = process.env.SPILLI_AGENT_TOOL_TIMEOUT_MS;
+  const priorMaxIterations = process.env.SPILLI_AGENT_MAX_ITERATIONS;
+  process.env.SPILLI_AGENT_TOOL_TIMEOUT_MS = '20';
+  process.env.SPILLI_AGENT_MAX_ITERATIONS = '3';
+
+  let modelCalls = 0;
+  const seenToolResults = [];
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const payload = {
+          toolName: 'workspace.readFile',
+          callId: 'timeout-call',
+          args: { file: 'missing.txt' }
+        };
+        const raw = JSON.stringify(payload);
+        return { raw, content: raw, isHarmony: false };
+      }
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    executeToolCall: async () => new Promise(resolve => setTimeout(() => resolve({
+      callId: 'timeout-call',
+      toolName: 'workspace.readFile',
+      ok: true,
+      result: { late: true }
+    }), 120))
+  });
+
+  try {
+    const result = await runtime.runTurn({ query: 'read file', model: 'test-model' }, {
+      onToolResult: item => seenToolResults.push(item)
+    });
+
+    assert.equal(result.content, 'done');
+    assert.equal(modelCalls, 2);
+    assert.equal(seenToolResults.length, 1);
+    assert.equal(seenToolResults[0].ok, false);
+    assert.match(seenToolResults[0].error, /Tool timed out: workspace\.readFile/);
+  } finally {
+    if (priorTimeout === undefined) {
+      delete process.env.SPILLI_AGENT_TOOL_TIMEOUT_MS;
+    } else {
+      process.env.SPILLI_AGENT_TOOL_TIMEOUT_MS = priorTimeout;
+    }
+    if (priorMaxIterations === undefined) {
+      delete process.env.SPILLI_AGENT_MAX_ITERATIONS;
+    } else {
+      process.env.SPILLI_AGENT_MAX_ITERATIONS = priorMaxIterations;
+    }
+  }
+});
+
+test('agent loop converts thrown tool exception into tool failure and continues iteration', async () => {
+  const priorMaxIterations = process.env.SPILLI_AGENT_MAX_ITERATIONS;
+  process.env.SPILLI_AGENT_MAX_ITERATIONS = '3';
+
+  let modelCalls = 0;
+  const seenToolResults = [];
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const payload = {
+          toolName: 'workspace.readFile',
+          callId: 'throw-call',
+          args: { file: 'missing.txt' }
+        };
+        const raw = JSON.stringify(payload);
+        return { raw, content: raw, isHarmony: false };
+      }
+      return { raw: 'done-throw', content: 'done-throw', isHarmony: false };
+    },
+    executeToolCall: async () => {
+      throw new Error('simulated tool crash');
+    }
+  });
+
+  try {
+    const result = await runtime.runTurn({ query: 'read file', model: 'test-model' }, {
+      onToolResult: item => seenToolResults.push(item)
+    });
+
+    assert.equal(result.content, 'done-throw');
+    assert.equal(modelCalls, 2);
+    assert.equal(seenToolResults.length, 1);
+    assert.equal(seenToolResults[0].ok, false);
+    assert.match(seenToolResults[0].error, /simulated tool crash/);
+  } finally {
+    if (priorMaxIterations === undefined) {
+      delete process.env.SPILLI_AGENT_MAX_ITERATIONS;
+    } else {
+      process.env.SPILLI_AGENT_MAX_ITERATIONS = priorMaxIterations;
+    }
+  }
+});

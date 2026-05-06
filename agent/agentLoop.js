@@ -289,7 +289,19 @@ class AgentLoop {
             completionRequirementRetries = 0;
             for (const call of run.toolCalls) {
                 callbacks.onToolCall(call);
-                const result = await withTimeout(this.tools.executeToolCall(call), this.options.toolTimeoutMs, `Tool timed out: ${call.toolName}`);
+                let result;
+                try {
+                    result = await withTimeout(this.tools.executeToolCall(call), this.options.toolTimeoutMs, `Tool timed out: ${call.toolName}`);
+                }
+                catch (error) {
+                    result = {
+                        callId: call.callId,
+                        toolName: call.toolName,
+                        ok: false,
+                        result: null,
+                        error: error instanceof Error ? error.message : String(error)
+                    };
+                }
                 callbacks.onToolResult(result);
                 state.toolResults.push(result);
                 const effectiveToolName = result.toolName;
