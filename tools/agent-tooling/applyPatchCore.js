@@ -312,34 +312,68 @@ async function applyHunks(root, hunks) {
         seen[bucket].add(value);
         summary[bucket].push(value);
     };
-    for (const hunk of hunks) {
-        if (hunk.kind === 'add') {
-            const target = await resolveWithinRootWithRecovery(root, hunk.filePath, 'target');
-            await fs.mkdir(path.dirname(target.absolute), { recursive: true });
-            await fs.writeFile(target.absolute, hunk.contents, 'utf8');
-            record('added', target.display);
-            continue;
+    const snapshots = new Map();
+    const rememberSnapshot = async (absolutePath) => {
+        if (snapshots.has(absolutePath)) {
+            return;
         }
-        if (hunk.kind === 'delete') {
-            const target = await resolveWithinRootWithRecovery(root, hunk.filePath, 'source');
-            await fs.rm(target.absolute, { force: false });
-            record('deleted', target.display);
-            continue;
+        if (await pathExists(absolutePath)) {
+            const content = await fs.readFile(absolutePath, 'utf8');
+            snapshots.set(absolutePath, { existed: true, content });
+            return;
         }
-        const source = await resolveWithinRootWithRecovery(root, hunk.filePath, 'source');
-        const current = await fs.readFile(source.absolute, 'utf8');
-        const updated = applyUpdateChunks(current, hunk.chunks);
-        if (hunk.moveTo) {
-            const moved = await resolveWithinRootWithRecovery(root, hunk.moveTo, 'target');
-            await fs.mkdir(path.dirname(moved.absolute), { recursive: true });
-            await fs.writeFile(moved.absolute, updated, 'utf8');
-            await fs.rm(source.absolute, { force: false });
-            record('modified', moved.display);
+        snapshots.set(absolutePath, { existed: false, content: '' });
+    };
+    const rollback = async () => {
+        for (const [absolutePath, snapshot] of snapshots.entries()) {
+            if (snapshot.existed) {
+                await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+                await fs.writeFile(absolutePath, snapshot.content, 'utf8');
+                continue;
+            }
+            if (await pathExists(absolutePath)) {
+                await fs.rm(absolutePath, { force: false });
+            }
         }
-        else {
-            await fs.writeFile(source.absolute, updated, 'utf8');
-            record('modified', source.display);
+    };
+    try {
+        for (const hunk of hunks) {
+            if (hunk.kind === 'add') {
+                const target = await resolveWithinRootWithRecovery(root, hunk.filePath, 'target');
+                await rememberSnapshot(target.absolute);
+                await fs.mkdir(path.dirname(target.absolute), { recursive: true });
+                await fs.writeFile(target.absolute, hunk.contents, 'utf8');
+                record('added', target.display);
+                continue;
+            }
+            if (hunk.kind === 'delete') {
+                const target = await resolveWithinRootWithRecovery(root, hunk.filePath, 'source');
+                await rememberSnapshot(target.absolute);
+                await fs.rm(target.absolute, { force: false });
+                record('deleted', target.display);
+                continue;
+            }
+            const source = await resolveWithinRootWithRecovery(root, hunk.filePath, 'source');
+            await rememberSnapshot(source.absolute);
+            const current = await fs.readFile(source.absolute, 'utf8');
+            const updated = applyUpdateChunks(current, hunk.chunks);
+            if (hunk.moveTo) {
+                const moved = await resolveWithinRootWithRecovery(root, hunk.moveTo, 'target');
+                await rememberSnapshot(moved.absolute);
+                await fs.mkdir(path.dirname(moved.absolute), { recursive: true });
+                await fs.writeFile(moved.absolute, updated, 'utf8');
+                await fs.rm(source.absolute, { force: false });
+                record('modified', moved.display);
+            }
+            else {
+                await fs.writeFile(source.absolute, updated, 'utf8');
+                record('modified', source.display);
+            }
         }
+    }
+    catch (error) {
+        await rollback();
+        throw error;
     }
     return summary;
 }

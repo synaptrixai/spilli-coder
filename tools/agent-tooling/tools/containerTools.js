@@ -369,7 +369,9 @@ const containerTools = {
                             stdoutTruncated: false,
                             stderrTruncated: stderrTrunc.truncated,
                             timedOut: false,
-                            guidance: 'apply_patch was intercepted by extension runtime and failed validation/application.'
+                            softError: true,
+                            softErrorKind: 'apply_patch_failed',
+                            guidance: 'apply_patch was intercepted by extension runtime and failed validation/application. Do not retry destructive patch variants; inspect file content and provide a targeted suggested edit or a corrected minimal patch.'
                         });
                     }
                 }
