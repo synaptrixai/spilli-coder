@@ -9,6 +9,7 @@ const os = require('node:os');
 const { createAgentRuntime } = require('../agentLoop');
 const shared = require('../tools/agent-tooling/shared');
 const containerTools = require('../tools/agent-tooling/tools/containerTools').default;
+const { applyPatchFromText } = require('../tools/agent-tooling/applyPatchCore');
 
 test('legacy workspace.proposeEdit compatibility applies edit immediately', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'spilli-compat-'));
@@ -226,6 +227,58 @@ test('container.exec apply_patch add-file reuses cwd directories instead of crea
   assert.equal(await fs.readFile(expectedPath, 'utf8'), 'module.exports = { ok: true };');
   await assert.rejects(
     fs.access(path.join(workspaceRoot, 'src', 'src', 'routes', 'catalog.js')),
+    /ENOENT/
+  );
+});
+
+test('applyPatchFromText rolls back delete when a later hunk fails', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'spilli-apply-rollback-delete-'));
+  const keepPath = path.join(workspaceRoot, 'keep.txt');
+  const targetPath = path.join(workspaceRoot, 'target.txt');
+  await fs.writeFile(keepPath, 'keep\n', 'utf8');
+  await fs.writeFile(targetPath, 'before\n', 'utf8');
+
+  const patch = [
+    '*** Begin Patch',
+    '*** Delete File: keep.txt',
+    '*** Update File: target.txt',
+    '@@',
+    '-does not exist',
+    '+after',
+    '*** End Patch'
+  ].join('\n');
+
+  await assert.rejects(() => applyPatchFromText(patch, workspaceRoot), /could not match update chunk context/i);
+  assert.equal(await fs.readFile(keepPath, 'utf8'), 'keep\n');
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'before\n');
+});
+
+test('applyPatchFromText rolls back updates when a later move fails', async () => {
+  const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'spilli-apply-rollback-move-'));
+  const sourcePath = path.join(workspaceRoot, 'source.txt');
+  const targetPath = path.join(workspaceRoot, 'target.txt');
+  await fs.writeFile(sourcePath, 'source before\n', 'utf8');
+  await fs.writeFile(targetPath, 'target before\n', 'utf8');
+
+  const patch = [
+    '*** Begin Patch',
+    '*** Update File: source.txt',
+    '@@',
+    '-source before',
+    '+source after',
+    '*** Update File: target.txt',
+    '*** Move to: missing-dir/renamed.txt',
+    '@@',
+    '-line that does not exist',
+    '+replacement',
+    '*** End Patch'
+  ].join('\n');
+
+  await assert.rejects(() => applyPatchFromText(patch, workspaceRoot), /could not match update chunk context/i);
+  assert.equal(await fs.readFile(sourcePath, 'utf8'), 'source before\n');
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'target before\n');
+  await assert.rejects(
+    fs.access(path.join(workspaceRoot, 'missing-dir', 'renamed.txt')),
     /ENOENT/
   );
 });
