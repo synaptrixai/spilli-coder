@@ -80,7 +80,10 @@ function extractCompletionRequirements(query) {
         /fenced\s+```diff\s*block/i.test(query) ||
         /diff\s*block/i.test(query);
     const requiresSubstantiveResponse = hasExecutionRequirementsSection || hasRequiredOutputSection;
-    if (!requiresSubstantiveResponse && !requiresDiffBlock) {
+    const asksForCodeChange = /\b(?:patch|code\s+change|edit|modify|fix|implementation|implement|concrete\s+code)\b/i.test(query);
+    const asksForValidation = /\b(?:tests?|validation|validate|verify|verification|lint|build|typecheck|check)\b/i.test(query);
+    const requiresPostEditValidation = requiresSubstantiveResponse && asksForCodeChange && asksForValidation;
+    if (!requiresSubstantiveResponse && !requiresDiffBlock && !requiresPostEditValidation) {
         return undefined;
     }
     const requiredSuccessfulTools = new Set();
@@ -97,6 +100,7 @@ function extractCompletionRequirements(query) {
     return {
         requiresDiffBlock,
         requiresSubstantiveResponse,
+        requiresPostEditValidation,
         requiredSuccessfulTools: [...requiredSuccessfulTools]
     };
 }
@@ -129,6 +133,73 @@ function isSubstantiveResponse(content) {
         .map(line => line.trim())
         .filter(line => line.length > 0);
     return nonEmptyLines.length >= 2;
+}
+function isObjectRecord(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+function nestedToolPayload(toolResult) {
+    if (!isObjectRecord(toolResult?.result)) {
+        return undefined;
+    }
+    return toolResult.result;
+}
+function isSuccessfulEditResult(toolResult) {
+    if (!toolResult?.ok) {
+        return false;
+    }
+    const toolName = typeof toolResult.toolName === 'string' ? toolResult.toolName.toLowerCase() : '';
+    const result = nestedToolPayload(toolResult);
+    if (toolName === 'workspace.proposeedit' || toolName === 'workspace.applyproposededit') {
+        return Boolean(result?.applied);
+    }
+    if (toolName === 'workspace.createfile') {
+        return Boolean(result?.created);
+    }
+    if (toolName !== 'container.exec') {
+        return false;
+    }
+    const command = typeof result?.command === 'string' ? result.command : '';
+    const stdout = typeof result?.stdout === 'string' ? result.stdout : '';
+    return Boolean(result?.appliedBy) ||
+        /\bapply_patch\b/.test(command) ||
+        /(?:^|\n)Success\.\s*\nUpdated the following files:/i.test(stdout);
+}
+function isValidationCommandResult(toolResult) {
+    const toolName = typeof toolResult?.toolName === 'string' ? toolResult.toolName.toLowerCase() : '';
+    if (toolName !== 'container.exec') {
+        return false;
+    }
+    const result = nestedToolPayload(toolResult);
+    const command = typeof result?.command === 'string' ? result.command : '';
+    if (!command.trim()) {
+        return false;
+    }
+    return /\b(?:pytest|tox|jest|vitest|eslint|ruff|flake8|mypy|tsc|phpunit|rspec)\b/i.test(command) ||
+        /\bpython(?:3)?\s+manage\.py\s+test\b/i.test(command) ||
+        /\b(?:npm|pnpm|yarn)\s+(?:test|run\s+(?:test|lint|build|typecheck|check))\b/i.test(command) ||
+        /\bgo\s+test\b/i.test(command) ||
+        /\bcargo\s+(?:test|check|clippy)\b/i.test(command) ||
+        /\b(?:mvn|gradle|gradlew)\s+(?:test|check|build)\b/i.test(command) ||
+        /\bmake\s+(?:test|check|lint|build)\b/i.test(command);
+}
+function postEditValidationIssue(state) {
+    const toolResults = Array.isArray(state?.toolResults) ? state.toolResults : [];
+    let lastEditIndex = -1;
+    for (let index = 0; index < toolResults.length; index += 1) {
+        if (isSuccessfulEditResult(toolResults[index])) {
+            lastEditIndex = index;
+        }
+    }
+    if (lastEditIndex < 0) {
+        return undefined;
+    }
+    const hasValidationAfterEdit = toolResults
+        .slice(lastEditIndex + 1)
+        .some(item => isValidationCommandResult(item));
+    if (hasValidationAfterEdit) {
+        return undefined;
+    }
+    return 'a post-edit validation command after the latest successful edit (for example a focused test, lint, build, or syntax check)';
 }
 class AgentLoop {
     adapter;
@@ -166,6 +237,9 @@ class AgentLoop {
             if (completionRequirements.requiresSubstantiveResponse) {
                 requirementLines.push(`- Final response must be substantive (at least ${MIN_SUBSTANTIVE_FINAL_RESPONSE_CHARS} non-whitespace characters and more than one non-empty line).`);
             }
+            if (completionRequirements.requiresPostEditValidation) {
+                requirementLines.push('- After applying code edits, run a focused validation command before the final response. If the command fails, report the result rather than retrying blindly.');
+            }
             requirementLines.push('- If execution requirements are not met yet, continue with tool calls instead of ending the response.');
             promptParts.push(requirementLines.join('\n'));
         }
@@ -200,6 +274,12 @@ class AgentLoop {
                 .filter(toolName => !successfulTools.has(toolName));
             if (missingTools.length > 0) {
                 gaps.push(`successful tool calls for ${missingTools.join(', ')}`);
+            }
+        }
+        if (requirements.requiresPostEditValidation) {
+            const issue = postEditValidationIssue(state);
+            if (issue) {
+                gaps.push(issue);
             }
         }
         if (gaps.length === 0) {

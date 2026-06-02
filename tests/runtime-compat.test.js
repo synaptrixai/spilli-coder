@@ -380,3 +380,176 @@ test('agent loop converts thrown tool exception into tool failure and continues 
     }
   }
 });
+
+test('agent loop requires post-edit validation when explicit requirements ask for tests', async () => {
+  const priorMaxIterations = process.env.SPILLI_AGENT_MAX_ITERATIONS;
+  process.env.SPILLI_AGENT_MAX_ITERATIONS = '5';
+
+  let modelCalls = 0;
+  const executedCommands = [];
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const payload = {
+          toolName: 'container.exec',
+          callId: 'edit-call',
+          args: {
+            cmd: [
+              'apply_patch <<\'PATCH\'',
+              '*** Begin Patch',
+              '*** Update File: app.py',
+              '@@',
+              '-old',
+              '+new',
+              '*** End Patch',
+              'PATCH'
+            ].join('\n')
+          }
+        };
+        const raw = JSON.stringify(payload);
+        return { raw, content: raw, isHarmony: false };
+      }
+      if (modelCalls === 2) {
+        return {
+          raw: 'Implemented patch.\n\n```diff\n--- a/app.py\n+++ b/app.py\n@@\n-old\n+new\n```',
+          content: 'Implemented patch.\n\n```diff\n--- a/app.py\n+++ b/app.py\n@@\n-old\n+new\n```',
+          isHarmony: false
+        };
+      }
+      if (modelCalls === 3) {
+        const payload = {
+          toolName: 'container.exec',
+          callId: 'test-call',
+          args: { cmd: 'pytest tests/test_app.py -q' }
+        };
+        const raw = JSON.stringify(payload);
+        return { raw, content: raw, isHarmony: false };
+      }
+      return {
+        raw: 'Implemented the requested patch and ran `pytest tests/test_app.py -q`, which passed. The applied change is shown below.\n\n```diff\n--- a/app.py\n+++ b/app.py\n@@\n-old\n+new\n```',
+        content: 'Implemented the requested patch and ran `pytest tests/test_app.py -q`, which passed. The applied change is shown below.\n\n```diff\n--- a/app.py\n+++ b/app.py\n@@\n-old\n+new\n```',
+        isHarmony: false
+      };
+    },
+    executeToolCall: async call => {
+      executedCommands.push(call.args.cmd);
+      if (call.callId === 'edit-call') {
+        return {
+          callId: call.callId,
+          toolName: call.toolName,
+          ok: true,
+          result: {
+            ok: true,
+            command: call.args.cmd,
+            stdout: 'Success.\nUpdated the following files:\nM app.py',
+            stderr: '',
+            appliedBy: 'spilli-extension'
+          }
+        };
+      }
+      return {
+        callId: call.callId,
+        toolName: call.toolName,
+        ok: true,
+        result: {
+          ok: true,
+          command: call.args.cmd,
+          stdout: '1 passed',
+          stderr: ''
+        }
+      };
+    }
+  });
+
+  try {
+    const result = await runtime.runTurn({
+      query: [
+        'Goal: produce a concrete code patch.',
+        'Execution requirements:',
+        '- Use available tools to apply a concrete edit.',
+        '- If tests can be updated safely, include tests or validation.',
+        '- End your final message with a fenced ```diff block.'
+      ].join('\n'),
+      model: 'test-model'
+    }, {});
+
+    assert.equal(modelCalls, 4);
+    assert.deepEqual(executedCommands.map(command => command.includes('pytest')), [false, true]);
+    assert.match(result.content, /ran `pytest tests\/test_app\.py -q`/i);
+  } finally {
+    if (priorMaxIterations === undefined) {
+      delete process.env.SPILLI_AGENT_MAX_ITERATIONS;
+    } else {
+      process.env.SPILLI_AGENT_MAX_ITERATIONS = priorMaxIterations;
+    }
+  }
+});
+
+test('agent loop accepts final response after validation follows edit', async () => {
+  const priorMaxIterations = process.env.SPILLI_AGENT_MAX_ITERATIONS;
+  process.env.SPILLI_AGENT_MAX_ITERATIONS = '4';
+
+  let modelCalls = 0;
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const payload = {
+          toolName: 'container.exec',
+          callId: 'edit-call',
+          args: { cmd: 'apply_patch <<\'PATCH\'\n*** Begin Patch\n*** Update File: app.py\n@@\n-old\n+new\n*** End Patch\nPATCH' }
+        };
+        const raw = JSON.stringify(payload);
+        return { raw, content: raw, isHarmony: false };
+      }
+      if (modelCalls === 2) {
+        const payload = {
+          toolName: 'container.exec',
+          callId: 'test-call',
+          args: { cmd: 'npm test -- --runInBand' }
+        };
+        const raw = JSON.stringify(payload);
+        return { raw, content: raw, isHarmony: false };
+      }
+      return {
+        raw: 'Implemented the requested patch and ran `npm test -- --runInBand`, which passed. The applied change is shown below.\n\n```diff\n--- a/app.py\n+++ b/app.py\n@@\n-old\n+new\n```',
+        content: 'Implemented the requested patch and ran `npm test -- --runInBand`, which passed. The applied change is shown below.\n\n```diff\n--- a/app.py\n+++ b/app.py\n@@\n-old\n+new\n```',
+        isHarmony: false
+      };
+    },
+    executeToolCall: async call => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ok: true,
+      result: {
+        ok: true,
+        command: call.args.cmd,
+        stdout: call.callId === 'test-call' ? 'passed' : 'Success.\nUpdated the following files:\nM app.py',
+        stderr: '',
+        appliedBy: call.callId === 'edit-call' ? 'spilli-extension' : undefined
+      }
+    })
+  });
+
+  try {
+    const result = await runtime.runTurn({
+      query: [
+        'Goal: make a code change.',
+        'Execution requirements:',
+        '- Include tests or validation.',
+        '- End with a ```diff block.'
+      ].join('\n'),
+      model: 'test-model'
+    }, {});
+
+    assert.equal(modelCalls, 3);
+    assert.doesNotMatch(result.content, /Execution requirements are not met/);
+  } finally {
+    if (priorMaxIterations === undefined) {
+      delete process.env.SPILLI_AGENT_MAX_ITERATIONS;
+    } else {
+      process.env.SPILLI_AGENT_MAX_ITERATIONS = priorMaxIterations;
+    }
+  }
+});
