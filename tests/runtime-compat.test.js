@@ -92,6 +92,221 @@ test('invalid markdown json tool payload is ignored instead of executing empty c
   assert.ok(result.content.includes('container.exec'));
 });
 
+test('responses api function_call output is parsed as an agent tool call', async () => {
+  let modelCalls = 0;
+  const forwardedCalls = [];
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const raw = JSON.stringify({
+          id: 'resp-test',
+          output: [
+            {
+              id: 'fc-test',
+              type: 'function_call',
+              call_id: 'call-test',
+              name: 'container.exec',
+              arguments: JSON.stringify({ cmd: 'node --version', timeoutMs: 1000 })
+            }
+          ]
+        });
+        return { raw, content: raw, isHarmony: false };
+      }
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    executeToolCall: async call => {
+      forwardedCalls.push(call);
+      return {
+        callId: call.callId,
+        toolName: call.toolName,
+        ok: true,
+        result: { forwarded: true }
+      };
+    }
+  });
+
+  await runtime.runTurn({ query: 'run a command', model: 'test-model' }, {});
+
+  assert.equal(forwardedCalls.length, 1);
+  assert.equal(forwardedCalls[0].toolName, 'container.exec');
+  assert.equal(forwardedCalls[0].callId, 'call-test');
+  assert.deepEqual(forwardedCalls[0].args, { cmd: 'node --version', timeoutMs: 1000 });
+});
+
+test('chat-style tool_calls payload is parsed as an agent tool call', async () => {
+  let modelCalls = 0;
+  const forwardedCalls = [];
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const raw = JSON.stringify({
+          choices: [
+            {
+              message: {
+                tool_calls: [
+                  {
+                    id: 'chat-call-test',
+                    type: 'function',
+                    function: {
+                      name: 'workspace.readFile',
+                      arguments: JSON.stringify({ file: 'package.json' })
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        });
+        return { raw, content: raw, isHarmony: false };
+      }
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    executeToolCall: async call => {
+      forwardedCalls.push(call);
+      return {
+        callId: call.callId,
+        toolName: call.toolName,
+        ok: true,
+        result: { forwarded: true }
+      };
+    }
+  });
+
+  await runtime.runTurn({ query: 'read a file', model: 'test-model' }, {});
+
+  assert.equal(forwardedCalls.length, 1);
+  assert.equal(forwardedCalls[0].toolName, 'workspace.readFile');
+  assert.equal(forwardedCalls[0].callId, 'chat-call-test');
+  assert.deepEqual(forwardedCalls[0].args, { file: 'package.json' });
+});
+
+test('adjacent json tool envelopes followed by prose are parsed as tool calls', async () => {
+  let modelCalls = 0;
+  const forwardedCalls = [];
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const raw =
+          '{"toolName":"ide.getActiveEditorContext","callId":"call1","args":{}}' +
+          '{"toolName":"workspace.searchText","callId":"call2","args":{"query":"\\"name\\"","maxResults":20}}' +
+          'I will inspect the workspace first.';
+        return { raw, content: raw, isHarmony: false };
+      }
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    executeToolCall: async call => {
+      forwardedCalls.push(call);
+      return {
+        callId: call.callId,
+        toolName: call.toolName,
+        ok: true,
+        result: { forwarded: true }
+      };
+    }
+  });
+
+  await runtime.runTurn({ query: 'inspect workspace', model: 'test-model' }, {});
+
+  assert.equal(forwardedCalls.length, 2);
+  assert.equal(forwardedCalls[0].toolName, 'ide.getActiveEditorContext');
+  assert.equal(forwardedCalls[0].callId, 'call1');
+  assert.deepEqual(forwardedCalls[0].args, {});
+  assert.equal(forwardedCalls[1].toolName, 'workspace.searchText');
+  assert.equal(forwardedCalls[1].callId, 'call2');
+  assert.deepEqual(forwardedCalls[1].args, { query: '"name"', maxResults: 20 });
+});
+
+test('agent runtime prefers extension parseToolCalls helper when available', async () => {
+  let modelCalls = 0;
+  let parseRequests = 0;
+  const forwardedCalls = [];
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          raw: 'extension helper should parse this',
+          content: 'extension helper should parse this',
+          isHarmony: false
+        };
+      }
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    parseToolCalls: async payload => {
+      parseRequests += 1;
+      assert.equal(payload.model, 'test-model');
+      if (!payload.raw.includes('extension helper should parse this')) {
+        return [];
+      }
+      return [
+        {
+          toolName: 'workspace.readFile',
+          callId: 'from-extension-parser',
+          args: { file: 'package.json' }
+        }
+      ];
+    },
+    executeToolCall: async call => {
+      forwardedCalls.push(call);
+      return {
+        callId: call.callId,
+        toolName: call.toolName,
+        ok: true,
+        result: { forwarded: true }
+      };
+    }
+  });
+
+  await runtime.runTurn({ query: 'read a file', model: 'test-model' }, {});
+
+  assert.equal(parseRequests, 2);
+  assert.equal(forwardedCalls.length, 1);
+  assert.equal(forwardedCalls[0].callId, 'from-extension-parser');
+});
+
+test('agent runtime falls back to local parser when extension helper fails', async () => {
+  let modelCalls = 0;
+  let parseRequests = 0;
+  const forwardedCalls = [];
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          raw: '{"toolName":"workspace.searchText","callId":"fallback-call","args":{"query":"fallback"}}',
+          content: '{"toolName":"workspace.searchText","callId":"fallback-call","args":{"query":"fallback"}}',
+          isHarmony: false
+        };
+      }
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    parseToolCalls: async () => {
+      parseRequests += 1;
+      throw new Error('simulated helper failure');
+    },
+    executeToolCall: async call => {
+      forwardedCalls.push(call);
+      return {
+        callId: call.callId,
+        toolName: call.toolName,
+        ok: true,
+        result: { forwarded: true }
+      };
+    }
+  });
+
+  await runtime.runTurn({ query: 'search text', model: 'test-model' }, {});
+
+  assert.equal(parseRequests, 2);
+  assert.equal(forwardedCalls.length, 1);
+  assert.equal(forwardedCalls[0].toolName, 'workspace.searchText');
+  assert.equal(forwardedCalls[0].callId, 'fallback-call');
+  assert.deepEqual(forwardedCalls[0].args, { query: 'fallback' });
+});
+
 test('workspace boundary checks do not allow sibling prefix paths', () => {
   const root = '/tmp/workspace';
   const sibling = '/tmp/workspace-other/file.txt';
@@ -373,6 +588,174 @@ test('agent loop converts thrown tool exception into tool failure and continues 
     assert.equal(seenToolResults[0].ok, false);
     assert.match(seenToolResults[0].error, /simulated tool crash/);
   } finally {
+    if (priorMaxIterations === undefined) {
+      delete process.env.SPILLI_AGENT_MAX_ITERATIONS;
+    } else {
+      process.env.SPILLI_AGENT_MAX_ITERATIONS = priorMaxIterations;
+    }
+  }
+});
+
+test('agent loop guides apply_patch envelopes toward git-style final diff blocks', async () => {
+  const priorMaxRetries = process.env.SPILLI_AGENT_MAX_COMPLETION_REQUIREMENT_RETRIES;
+  const priorMaxIterations = process.env.SPILLI_AGENT_MAX_ITERATIONS;
+  process.env.SPILLI_AGENT_MAX_COMPLETION_REQUIREMENT_RETRIES = '1';
+  process.env.SPILLI_AGENT_MAX_ITERATIONS = '3';
+
+  let modelCalls = 0;
+  const modelRequests = [];
+  const runtime = createAgentRuntime({
+    runModel: async ({ prompt, query }) => {
+      modelCalls += 1;
+      modelRequests.push({ prompt, query });
+      if (modelCalls === 1) {
+        const content = [
+          'Implemented the requested change and included the applied patch below.',
+          '',
+          '```diff',
+          '*** Begin Patch',
+          '*** Update File: app.js',
+          '@@',
+          '-old',
+          '+new',
+          '*** End Patch',
+          '```'
+        ].join('\n');
+        return { raw: content, content, isHarmony: false };
+      }
+      const content = [
+        'Implemented the requested change and included the applied patch below.',
+        '',
+        '```diff',
+        'diff --git a/app.js b/app.js',
+        '--- a/app.js',
+        '+++ b/app.js',
+        '@@ -1 +1 @@',
+        '-old',
+        '+new',
+        '```'
+      ].join('\n');
+      return { raw: content, content, isHarmony: false };
+    },
+    executeToolCall: async call => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ok: true,
+      result: { forwarded: true }
+    })
+  });
+
+  try {
+    const result = await runtime.runTurn({
+      query: [
+        'Fix the bug.',
+        '',
+        'Execution requirements:',
+        '- End your final message with a fenced ```diff block of the applied patch.'
+      ].join('\n'),
+      model: 'test-model'
+    }, {});
+
+    assert.equal(modelCalls, 2);
+    assert.match(modelRequests[0].prompt, /Do not put apply_patch envelope syntax/i);
+    assert.match(modelRequests[1].query, /Run `git diff -- <changed files>`/);
+    assert.match(result.content, /diff --git a\/app\.js b\/app\.js/);
+    assert.doesNotMatch(result.content, /\*\*\* Begin Patch/);
+  } finally {
+    if (priorMaxRetries === undefined) {
+      delete process.env.SPILLI_AGENT_MAX_COMPLETION_REQUIREMENT_RETRIES;
+    } else {
+      process.env.SPILLI_AGENT_MAX_COMPLETION_REQUIREMENT_RETRIES = priorMaxRetries;
+    }
+    if (priorMaxIterations === undefined) {
+      delete process.env.SPILLI_AGENT_MAX_ITERATIONS;
+    } else {
+      process.env.SPILLI_AGENT_MAX_ITERATIONS = priorMaxIterations;
+    }
+  }
+});
+
+test('agent loop requires a successful edit when execution requirements demand concrete changes', async () => {
+  const priorMaxRetries = process.env.SPILLI_AGENT_MAX_COMPLETION_REQUIREMENT_RETRIES;
+  const priorMaxIterations = process.env.SPILLI_AGENT_MAX_ITERATIONS;
+  process.env.SPILLI_AGENT_MAX_COMPLETION_REQUIREMENT_RETRIES = '1';
+  process.env.SPILLI_AGENT_MAX_ITERATIONS = '4';
+
+  let modelCalls = 0;
+  const modelRequests = [];
+  const runtime = createAgentRuntime({
+    runModel: async ({ query }) => {
+      modelCalls += 1;
+      modelRequests.push(query);
+      if (modelCalls === 1 || modelCalls > 2) {
+        const content = [
+          'Implemented the requested source change with a minimal patch and verified the applied edit is reflected in the final diff below.',
+          '',
+          '```diff',
+          'diff --git a/app.js b/app.js',
+          '--- a/app.js',
+          '+++ b/app.js',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '```'
+        ].join('\n');
+        return { raw: content, content, isHarmony: false };
+      }
+      const payload = {
+        toolName: 'container.exec',
+        callId: 'edit-call',
+        args: {
+          cmd: [
+            'apply_patch <<\'PATCH\'',
+            '*** Begin Patch',
+            '*** Update File: app.js',
+            '@@',
+            '-old',
+            '+new',
+            '*** End Patch',
+            'PATCH'
+          ].join('\n')
+        }
+      };
+      const raw = JSON.stringify(payload);
+      return { raw, content: raw, isHarmony: false };
+    },
+    executeToolCall: async call => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ok: true,
+      result: {
+        command: call.args.cmd,
+        exitCode: 0,
+        appliedBy: 'spilli-extension'
+      }
+    })
+  });
+
+  try {
+    const result = await runtime.runTurn({
+      query: [
+        'Fix the bug.',
+        '',
+        'Execution requirements:',
+        '- Produce a concrete code patch.',
+        '- Use available workspace/shell tooling to apply at least one concrete edit.',
+        '- End your final message with a fenced ```diff block of the applied patch.'
+      ].join('\n'),
+      model: 'test-model'
+    }, {});
+
+    assert.equal(modelCalls, 3);
+    assert.match(modelRequests[1], /successful applied code edit/i);
+    assert.match(result.content, /diff --git a\/app\.js b\/app\.js/);
+    assert.doesNotMatch(result.content, /Execution requirements are not met/);
+  } finally {
+    if (priorMaxRetries === undefined) {
+      delete process.env.SPILLI_AGENT_MAX_COMPLETION_REQUIREMENT_RETRIES;
+    } else {
+      process.env.SPILLI_AGENT_MAX_COMPLETION_REQUIREMENT_RETRIES = priorMaxRetries;
+    }
     if (priorMaxIterations === undefined) {
       delete process.env.SPILLI_AGENT_MAX_ITERATIONS;
     } else {

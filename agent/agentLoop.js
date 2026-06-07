@@ -80,7 +80,10 @@ function extractCompletionRequirements(query) {
         /fenced\s+```diff\s*block/i.test(query) ||
         /diff\s*block/i.test(query);
     const requiresSubstantiveResponse = hasExecutionRequirementsSection || hasRequiredOutputSection;
-    if (!requiresSubstantiveResponse && !requiresDiffBlock) {
+    const requiresSuccessfulEdit = hasExecutionRequirementsSection && (/(apply|make|produce)\s+(?:at\s+least\s+one\s+)?(?:concrete\s+)?(?:code\s+)?(?:edit|change|patch)/i.test(query) ||
+        /concrete\s+code\s+(?:edit|change|patch)/i.test(query) ||
+        /via\s+apply_patch/i.test(query));
+    if (!requiresSubstantiveResponse && !requiresDiffBlock && !requiresSuccessfulEdit) {
         return undefined;
     }
     const requiredSuccessfulTools = new Set();
@@ -97,6 +100,7 @@ function extractCompletionRequirements(query) {
     return {
         requiresDiffBlock,
         requiresSubstantiveResponse,
+        requiresSuccessfulEdit,
         requiredSuccessfulTools: [...requiredSuccessfulTools]
     };
 }
@@ -130,6 +134,48 @@ function isSubstantiveResponse(content) {
         .filter(line => line.length > 0);
     return nonEmptyLines.length >= 2;
 }
+function parseToolResultPayload(result) {
+    if (!result || typeof result !== 'object') {
+        return undefined;
+    }
+    const payload = result.result;
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+        return payload;
+    }
+    if (typeof payload !== 'string') {
+        return undefined;
+    }
+    try {
+        const parsed = JSON.parse(payload);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function isSuccessfulEditResult(result) {
+    if (!result?.ok) {
+        return false;
+    }
+    const toolName = typeof result.toolName === 'string' ? result.toolName : '';
+    const payload = parseToolResultPayload(result);
+    if (toolName === 'workspace.createFile' && payload?.created === true) {
+        return true;
+    }
+    if (toolName === 'workspace.proposeEdit' && payload?.applied === true) {
+        return true;
+    }
+    if (toolName === 'workspace.applyProposedEdit' && payload?.applied === true) {
+        return true;
+    }
+    if (toolName === 'container.exec') {
+        const command = typeof payload?.command === 'string' ? payload.command : '';
+        return payload?.appliedBy === 'spilli-extension' ||
+            payload?.autoRecoveredPath === true && /apply_patch\b/.test(command) ||
+            /apply_patch\b/.test(command) && payload?.exitCode === 0;
+    }
+    return payload?.applied === true || payload?.created === true || payload?.edited === true;
+}
 class AgentLoop {
     adapter;
     tools;
@@ -161,7 +207,8 @@ class AgentLoop {
                 '- The user provided explicit execution requirements. Satisfy those requirements before ending the response.'
             ];
             if (completionRequirements.requiresDiffBlock) {
-                requirementLines.push('- Final response must include a fenced ```diff block when requested.');
+                requirementLines.push('- Final response must include a fenced ```diff block when requested, containing a git-style/unified diff with file headers such as "diff --git", "---", and "+++".');
+                requirementLines.push('- Do not put apply_patch envelope syntax such as "*** Begin Patch" inside the final ```diff block; run `git diff -- <changed files>` or manually format a unified diff from the applied changes.');
             }
             if (completionRequirements.requiresSubstantiveResponse) {
                 requirementLines.push(`- Final response must be substantive (at least ${MIN_SUBSTANTIVE_FINAL_RESPONSE_CHARS} non-whitespace characters and more than one non-empty line).`);
@@ -185,6 +232,9 @@ class AgentLoop {
         if (requirements.requiresSubstantiveResponse && !isSubstantiveResponse(content)) {
             gaps.push(`a substantive final response (${MIN_SUBSTANTIVE_FINAL_RESPONSE_CHARS}+ non-whitespace characters across multiple lines)`);
         }
+        if (requirements.requiresSuccessfulEdit && !state.toolResults.some(result => isSuccessfulEditResult(result))) {
+            gaps.push('a successful applied code edit through workspace or shell tooling');
+        }
         if (requirements.requiredSuccessfulTools.length > 0) {
             const successfulTools = new Set(state.toolResults
                 .filter(item => item.ok)
@@ -205,9 +255,16 @@ class AgentLoop {
         if (gaps.length === 0) {
             return undefined;
         }
+        let guidance = 'Continue with tool calls and provide a complete patch response.';
+        if (requirements.requiresSuccessfulEdit && gaps.some(gap => /applied code edit/i.test(gap))) {
+            guidance = 'Apply a minimal code change with an available edit tool, verify it, then provide the final patch response.';
+        }
+        if (requirements.requiresDiffBlock && gaps.some(gap => /git-style|fenced\s+```diff/i.test(gap))) {
+            guidance = 'Run `git diff -- <changed files>` or convert the applied changes to a unified diff, then end with that output inside a fenced ```diff block.';
+        }
         return ('Execution requirements are not met yet: missing ' +
             gaps.join(', ') +
-            '. Continue with tool calls and provide a complete patch response.');
+            `. ${guidance}`);
     }
     async runTurn(request, callbacks) {
         const completionRequirements = extractCompletionRequirements(request.query);

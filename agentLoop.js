@@ -257,22 +257,137 @@ function tryParseJsonObject(candidate) {
   }
 }
 
+function extractJsonObjectCandidates(body) {
+  const candidates = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    if (start < 0) {
+      if (char === '{') {
+        start = index;
+        depth = 1;
+      }
+      continue;
+    }
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        candidates.push(body.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function parseToolArguments(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return {};
+  }
+  const parsed = tryParseJsonObject(value.trim());
+  return parsed ?? {};
+}
+
 function toToolCallEnvelope(record) {
   if (!record || typeof record !== 'object') {
     return undefined;
   }
-  const toolName = normalizeLegacyToolName(record.toolName);
+  const responseFunctionName =
+    record.type === 'function_call' ||
+    typeof record.call_id === 'string' ||
+    typeof record.arguments !== 'undefined'
+      ? record.name
+      : undefined;
+  const toolName = normalizeLegacyToolName(record.toolName || responseFunctionName);
   if (!toolName) {
     return undefined;
   }
   const callId =
     typeof record.callId === 'string' && record.callId.trim().length > 0
       ? record.callId.trim()
+      : typeof record.call_id === 'string' && record.call_id.trim().length > 0
+        ? record.call_id.trim()
+        : typeof record.id === 'string' && record.id.trim().length > 0
+          ? record.id.trim()
       : `external-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const args = record.args && typeof record.args === 'object' && !Array.isArray(record.args)
-    ? record.args
-    : {};
+  const args = parseToolArguments(
+    typeof record.args !== 'undefined'
+      ? record.args
+      : typeof record.arguments !== 'undefined'
+        ? record.arguments
+        : undefined
+  );
   return { toolName, callId, args };
+}
+
+function collectToolCallsFromParsed(value, calls) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectToolCallsFromParsed(item, calls);
+    }
+    return;
+  }
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+
+  const direct = toToolCallEnvelope(value);
+  if (direct) {
+    calls.push(direct);
+  }
+
+  if (value.function && typeof value.function === 'object' && !Array.isArray(value.function)) {
+    const chatToolCall = toToolCallEnvelope({
+      type: 'function_call',
+      id: value.id,
+      call_id: value.id,
+      name: value.function.name,
+      arguments: value.function.arguments
+    });
+    if (chatToolCall) {
+      calls.push(chatToolCall);
+    }
+  }
+
+  for (const key of ['toolCalls', 'tool_calls', 'output', 'items', 'choices']) {
+    if (Array.isArray(value[key])) {
+      collectToolCallsFromParsed(value[key], calls);
+    }
+  }
+  if (value.item && typeof value.item === 'object') {
+    collectToolCallsFromParsed(value.item, calls);
+  }
+  if (value.message && typeof value.message === 'object') {
+    collectToolCallsFromParsed(value.message, calls);
+  }
 }
 
 function parseToolCalls(raw, content) {
@@ -300,10 +415,17 @@ function parseToolCalls(raw, content) {
       if (!parsed) {
         continue;
       }
-      const direct = toToolCallEnvelope(parsed);
-      if (direct) {
-        calls.push(direct);
+      collectToolCallsFromParsed(parsed, calls);
+    }
+  }
+
+  for (const body of candidates) {
+    for (const candidate of extractJsonObjectCandidates(body)) {
+      const parsed = tryParseJsonObject(candidate);
+      if (!parsed) {
+        continue;
       }
+      collectToolCallsFromParsed(parsed, calls);
     }
   }
 
@@ -373,20 +495,7 @@ function parseToolCalls(raw, content) {
       continue;
     }
 
-    if (Array.isArray(parsed.toolCalls)) {
-      for (const item of parsed.toolCalls) {
-        const call = toToolCallEnvelope(item);
-        if (call) {
-          calls.push(call);
-        }
-      }
-      continue;
-    }
-
-    const direct = toToolCallEnvelope(parsed);
-    if (direct) {
-      calls.push(direct);
-    }
+    collectToolCallsFromParsed(parsed, calls);
   }
 
   const seen = new Set();
@@ -444,6 +553,21 @@ class ExternalModelAdapter {
     return sections.join('\n\n');
   }
 
+  async parseToolCalls(raw, content, model) {
+    if (typeof this.runtimeContext.parseToolCalls !== 'function') {
+      return parseToolCalls(raw, content);
+    }
+    try {
+      const parsed = await this.runtimeContext.parseToolCalls({ raw, content, model });
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      debug('extension parseToolCalls failed; falling back to local parser', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return parseToolCalls(raw, content);
+    }
+  }
+
   async runOnce(args) {
     const prompt = asString(args.state.systemPrompt);
     const query = this.buildQuery(args.state);
@@ -490,7 +614,7 @@ class ExternalModelAdapter {
       raw,
       content: content || raw,
       isHarmony,
-      toolCalls: parseToolCalls(raw, content)
+      toolCalls: await this.parseToolCalls(raw, content, args.model)
     };
   }
 }
