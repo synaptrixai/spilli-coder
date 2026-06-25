@@ -307,6 +307,63 @@ test('agent runtime falls back to local parser when extension helper fails', asy
   assert.deepEqual(forwardedCalls[0].args, { query: 'fallback' });
 });
 
+test('agent runtime reports background status through hooks while model and tools run', async () => {
+  let modelCalls = 0;
+  const statuses = [];
+  const runtime = createAgentRuntime({
+    runModel: async () => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const raw = JSON.stringify({
+          toolName: 'workspace.readFile',
+          callId: 'status-call',
+          args: { file: 'README.md' }
+        });
+        return { raw, content: raw, isHarmony: false };
+      }
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    executeToolCall: async call => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ok: true,
+      result: { found: true }
+    })
+  });
+
+  const result = await runtime.runTurn({ query: 'read file', model: 'test-model' }, {
+    onStatus: status => statuses.push(status)
+  });
+
+  assert.equal(result.content, 'done');
+  assert.equal(modelCalls, 2);
+  assert.ok(statuses.some(status => status.phase === 'planning'));
+  assert.ok(statuses.some(status => status.phase === 'model' && /waiting/i.test(status.message)));
+  assert.ok(statuses.some(status => status.phase === 'working' && /model output/i.test(status.message)));
+  assert.ok(statuses.some(status => status.phase === 'tool' && status.toolName === 'workspace.readFile'));
+  assert.ok(statuses.some(status => status.phase === 'finalizing'));
+});
+
+test('agent runtime falls back to context.reportStatus when hook status callback is unavailable', async () => {
+  const statuses = [];
+  const runtime = createAgentRuntime({
+    reportStatus: status => statuses.push(status),
+    runModel: async () => ({ raw: 'done', content: 'done', isHarmony: false }),
+    executeToolCall: async call => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ok: true,
+      result: null
+    })
+  });
+
+  await runtime.runTurn({ query: 'finish', model: 'test-model' }, {});
+
+  assert.ok(statuses.some(status => status.phase === 'planning'));
+  assert.ok(statuses.some(status => status.phase === 'model'));
+  assert.ok(statuses.some(status => status.phase === 'finalizing'));
+});
+
 test('workspace boundary checks do not allow sibling prefix paths', () => {
   const root = '/tmp/workspace';
   const sibling = '/tmp/workspace-other/file.txt';

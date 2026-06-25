@@ -304,6 +304,11 @@ class AgentLoop {
             if (callbacks.token?.isCancellationRequested) {
                 throw new Error('Request cancelled.');
             }
+            callbacks.onStatus?.({
+                phase: 'planning',
+                message: state.toolResults.length > 0 ? 'Reviewing tool results and planning next step.' : 'Planning first step.',
+                iteration: iteration + 1
+            });
             const run = await this.adapter.runOnce({
                 iteration,
                 model: request.model,
@@ -312,7 +317,8 @@ class AgentLoop {
                 state,
                 onChunk: callbacks.onChunk,
                 onModelRequest: callbacks.onModelRequest,
-                onModelResponse: callbacks.onModelResponse
+                onModelResponse: callbacks.onModelResponse,
+                onStatus: callbacks.onStatus
             });
             finalRaw = run.raw;
             finalDisplay = run.content;
@@ -321,6 +327,11 @@ class AgentLoop {
                 const completionIssue = this.completionRequirementsIssue(completionRequirements, state, finalDisplay);
                 if (completionIssue) {
                     if (completionRequirementRetries >= maxCompletionRequirementRetries) {
+                        callbacks.onStatus?.({
+                            phase: 'finalizing',
+                            message: 'Returning response with unmet execution requirement guidance.',
+                            iteration: iteration + 1
+                        });
                         return {
                             raw: finalRaw,
                             content: finalDisplay ? `${finalDisplay}\n\n${completionIssue}` : completionIssue,
@@ -337,6 +348,11 @@ class AgentLoop {
                     });
                     continue;
                 }
+                callbacks.onStatus?.({
+                    phase: 'finalizing',
+                    message: 'Preparing final response.',
+                    iteration: iteration + 1
+                });
                 return {
                     raw: finalRaw,
                     content: finalDisplay,
@@ -344,7 +360,15 @@ class AgentLoop {
                 };
             }
             completionRequirementRetries = 0;
-            for (const call of run.toolCalls) {
+            for (let callIndex = 0; callIndex < run.toolCalls.length; callIndex += 1) {
+                const call = run.toolCalls[callIndex];
+                callbacks.onStatus?.({
+                    phase: 'tool',
+                    message: 'Running tool.',
+                    iteration: iteration + 1,
+                    toolName: call.toolName,
+                    progress: run.toolCalls.length > 0 ? callIndex / run.toolCalls.length : undefined
+                });
                 callbacks.onToolCall(call);
                 let result;
                 try {
@@ -361,6 +385,13 @@ class AgentLoop {
                 }
                 callbacks.onToolResult(result);
                 state.toolResults.push(result);
+                callbacks.onStatus?.({
+                    phase: result.ok ? 'working' : 'error',
+                    message: result.ok ? 'Tool result received.' : 'Tool returned an error.',
+                    iteration: iteration + 1,
+                    toolName: result.toolName,
+                    progress: run.toolCalls.length > 0 ? (callIndex + 1) / run.toolCalls.length : undefined
+                });
                 const effectiveToolName = result.toolName;
                 if (!result.ok) {
                     const signature = `${effectiveToolName}|${result.error ?? ''}`;
@@ -379,6 +410,12 @@ class AgentLoop {
                             ok: false,
                             result: null,
                             error: guidance
+                        });
+                        callbacks.onStatus?.({
+                            phase: 'error',
+                            message: 'Stopped after repeated identical tool failures.',
+                            iteration: iteration + 1,
+                            detail: guidance
                         });
                         return {
                             raw: finalRaw,
@@ -407,12 +444,21 @@ class AgentLoop {
         }
         const completionIssue = this.completionRequirementsIssue(completionRequirements, state, finalDisplay);
         if (completionIssue) {
+            callbacks.onStatus?.({
+                phase: 'finalizing',
+                message: 'Returning response with unmet execution requirement guidance.',
+                detail: completionIssue
+            });
             return {
                 raw: finalRaw,
                 content: finalDisplay ? `${finalDisplay}\n\n${completionIssue}` : completionIssue,
                 isHarmony: finalIsHarmony
             };
         }
+        callbacks.onStatus?.({
+            phase: 'finalizing',
+            message: hasIterationLimit ? 'Reached the configured iteration boundary.' : 'Preparing final response.'
+        });
         return {
             raw: finalRaw,
             content: finalDisplay,

@@ -245,6 +245,75 @@ function debug(message, detail) {
   console.log(`[spilli][external-agent][spilli-coder] ${message}${suffix}`);
 }
 
+const VALID_STATUS_PHASES = new Set([
+  'planning',
+  'waiting',
+  'model',
+  'tool',
+  'working',
+  'finalizing',
+  'done',
+  'error'
+]);
+
+function sanitizeStatusUpdate(status) {
+  if (!status || typeof status !== 'object' || Array.isArray(status)) {
+    return undefined;
+  }
+  const phase = typeof status.phase === 'string' ? status.phase.trim() : '';
+  const message = typeof status.message === 'string' ? status.message.trim() : '';
+  if (!VALID_STATUS_PHASES.has(phase) || !message) {
+    return undefined;
+  }
+  const sanitized = { phase, message };
+  if (typeof status.detail === 'string' && status.detail.trim()) {
+    sanitized.detail = status.detail.trim();
+  }
+  if (typeof status.iteration === 'number' && Number.isFinite(status.iteration)) {
+    sanitized.iteration = status.iteration;
+  }
+  if (typeof status.toolName === 'string' && status.toolName.trim()) {
+    sanitized.toolName = status.toolName.trim();
+  }
+  if (typeof status.progress === 'number' && Number.isFinite(status.progress)) {
+    sanitized.progress = Math.max(0, Math.min(1, status.progress));
+  }
+  if (status.metadata && typeof status.metadata === 'object' && !Array.isArray(status.metadata)) {
+    sanitized.metadata = status.metadata;
+  }
+  return sanitized;
+}
+
+function emitStatus(hooks, runtimeContext, status) {
+  const sanitized = sanitizeStatusUpdate(status);
+  if (!sanitized) {
+    return;
+  }
+  try {
+    if (typeof hooks?.onStatus === 'function') {
+      hooks.onStatus(sanitized);
+    } else if (typeof runtimeContext?.reportStatus === 'function') {
+      runtimeContext.reportStatus(sanitized);
+    }
+    debug('status emitted', {
+      phase: sanitized.phase,
+      message: sanitized.message,
+      iteration: sanitized.iteration,
+      toolName: sanitized.toolName
+    });
+  } catch (error) {
+    debug('status emission failed', {
+      phase: sanitized.phase,
+      message: sanitized.message,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function displayIteration(iteration) {
+  return Number.isFinite(iteration) ? iteration + 1 : undefined;
+}
+
 function tryParseJsonObject(candidate) {
   try {
     const parsed = JSON.parse(candidate);
@@ -580,6 +649,12 @@ class ExternalModelAdapter {
       });
     }
 
+    emitStatus(args, this.runtimeContext, {
+      phase: 'model',
+      message: 'Waiting for model response.',
+      iteration: displayIteration(args.iteration)
+    });
+
     const run = await this.runtimeContext.runModel({
       prompt,
       query,
@@ -610,11 +685,18 @@ class ExternalModelAdapter {
       });
     }
 
+    emitStatus(args, this.runtimeContext, {
+      phase: 'working',
+      message: 'Inspecting model output for tool calls.',
+      iteration: displayIteration(args.iteration)
+    });
+    const toolCalls = await this.parseToolCalls(raw, content, args.model);
+
     return {
       raw,
       content: content || raw,
       isHarmony,
-      toolCalls: await this.parseToolCalls(raw, content, args.model)
+      toolCalls
     };
   }
 }
@@ -814,6 +896,11 @@ function normalizeHooks(hooks) {
     onEditProposal: typeof hooks?.onEditProposal === 'function' ? hooks.onEditProposal : () => {},
     onModelRequest: typeof hooks?.onModelRequest === 'function' ? hooks.onModelRequest : () => {},
     onModelResponse: typeof hooks?.onModelResponse === 'function' ? hooks.onModelResponse : () => {},
+    onStatus: typeof hooks?.onStatus === 'function'
+      ? hooks.onStatus
+      : typeof hooks?.reportStatus === 'function'
+        ? hooks.reportStatus
+        : undefined,
     token: hooks?.token
   };
 }
@@ -852,7 +939,11 @@ function createAgentRuntime(runtimeContext) {
   return {
     runTurn: (request, hooks) => {
       contextCollector.setHostEnvironment(request?.hostEnvironment);
-      return loop.runTurn(request, normalizeHooks(hooks));
+      const normalizedHooks = normalizeHooks({
+        ...hooks,
+        reportStatus: runtimeContext?.reportStatus
+      });
+      return loop.runTurn(request, normalizedHooks);
     }
   };
 }
