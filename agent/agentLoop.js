@@ -17,6 +17,8 @@ const TOOL_USAGE_RULES = [
     '- Do not emit non-JSON argument payloads.',
     '- Do not invent alternate key names when a key is listed above.',
     '- Use fully-qualified tool names from the contracts (for example "workspace.searchText").',
+    '- If Current context includes "workspaceRoot", treat it as the authoritative workspace path; do not call container.exec just to run pwd.',
+    '- Never invent file names, paths, or tool outputs in the final response. Summarize only facts present in Current context or successful tool results; if output is truncated, say so.',
     '- Use workspace-relative paths when possible (for example "package.json"), but absolute paths are supported.',
     '- Reuse prior tool results. Do not repeat identical calls when required data is already available.',
     '- If workspace.readFile returns {"found": false, ...}, retry using one of the suggested paths instead of repeating the same bad path.',

@@ -3,7 +3,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { AgentLoop } = require('./agent/agentLoop');
-const { applyPatchFromText } = require('./tools/agent-tooling/applyPatchCore');
 
 const ALWAYS_AVAILABLE_CONTRACTS = [
   {
@@ -11,6 +10,7 @@ const ALWAYS_AVAILABLE_CONTRACTS = [
     description: 'Search available tool contracts (including tools not yet active).',
     args: '{"query"?: string}',
     returns: '{"query": string, "count": number, "contracts": Array<{name, description, args, returns, notes?, enabled}>}',
+    notes: 'Use this first when you need capabilities beyond the default context.',
     includeByDefault: true
   },
   {
@@ -18,6 +18,7 @@ const ALWAYS_AVAILABLE_CONTRACTS = [
     description: 'Enable additional tools in the current agent turn context.',
     args: '{"toolNames": string[]}',
     returns: '{"requested": string[], "enabled": string[], "resolved": Array<{requested, resolved}>, "unknown": string[], "activeToolCount": number}',
+    notes: 'Enable only the specific tools you need right now. Prefers fully-qualified names but also accepts unambiguous short names.',
     includeByDefault: true
   }
 ];
@@ -28,6 +29,7 @@ const DEFAULT_CONTEXT_CONTRACTS = [
     description: 'Get active editor file, language, selection, and visible range.',
     args: '{}',
     returns: '{"active": boolean, "file"?: string, "languageId"?: string, "selection"?: {...}, "visibleRange"?: {...}}',
+    notes: 'selection/visibleRange line values are 1-based. character values are 0-based.',
     includeByDefault: true
   },
   {
@@ -42,6 +44,7 @@ const DEFAULT_CONTEXT_CONTRACTS = [
     description: 'Get diagnostics for active file or requested file.',
     args: '{"file"?: string}',
     returns: '{"file": string, "diagnostics": Array<...>}',
+    notes: 'diagnostic range line values are 1-based. character values are 0-based.',
     includeByDefault: true
   },
   {
@@ -49,28 +52,53 @@ const DEFAULT_CONTEXT_CONTRACTS = [
     description: 'Search text across workspace files.',
     args: '{"query": string, "maxResults"?: number}',
     returns: '{"query": string, "results": Array<{file, line, preview}>, "count": number}',
+    notes: 'search result line values are 1-based.',
     includeByDefault: true
   },
   {
     name: 'workspace.readFile',
     description: 'Read file contents with optional line ranges.',
-    args: '{"file": string} plus optional range args',
-    returns: '{"found": boolean, "content"?: string, ...}',
+    args:
+      '{"file": string} OR {"path": string} OR {"filePath": string}; optional range args: {"startLine": number, "endLine": number} OR {"line": number, "count": number} OR {"startLine": number, "count": number}',
+    returns:
+      '{"found": true, "file": string, "totalLines": number, "range"?: {"startLine": number, "endLine": number}, "truncated": boolean, "content": string, "numberedLines"?: Array<{"line": number, "text": string}>} OR {"found": false, ...}',
+    notes: 'file/path accepts workspace-relative and absolute paths. line arguments are 1-based and inclusive.',
     includeByDefault: true
   },
   {
     name: 'workspace.createFile',
     description: 'Create a new file in workspace, with optional overwrite.',
     args: '{"file": string, "content"?: string, "overwrite"?: boolean}',
-    returns: '{"created": true, "file": string, ...} OR {"created": false, "alreadyExists": true, ...}',
+    returns:
+      '{"created": true, "file": string, "overwritten": boolean, "bytesWritten": number, "lineCount": number, "contentHash": string} OR {"created": false, "alreadyExists": true, ...}',
+    includeByDefault: true
+  },
+  {
+    name: 'workspace.proposeEdit',
+    description: 'Propose a targeted text edit over a line/character range in a file.',
+    args:
+      '{"file": string, "replacement"?: string, "startLine": number, "startCharacter": number, "endLine": number, "endCharacter": number, "summary"?: string, "expectedOldText"?: string}',
+    returns:
+      '{"proposalId": string | null, "approvalToken": string, "file": string, "summary": string, "diff": string, "warnings": string[], "applied"?: boolean}',
+    notes:
+      'Line values are 1-based and character values are 0-based. The extension may require a separate workspace.applyProposedEdit approval flow unless auto-approval is enabled.',
+    includeByDefault: true
+  },
+  {
+    name: 'workspace.applyProposedEdit',
+    description: 'Apply a pending edit proposal created by workspace.proposeEdit.',
+    args: '{"proposalId": string, "approvalToken": string}',
+    returns: '{"applied": boolean, "file"?: string, "reason"?: string}',
     includeByDefault: true
   },
   {
     name: 'container.exec',
     description: 'Execute a non-interactive shell command in the current workspace.',
     args: '{"cmd": string | string[], "cwd"?: string, "timeoutMs"?: number, "maxOutputChars"?: number}',
-    returns: '{"ok": boolean, "stdout": string, "stderr": string, ...}',
-    notes: 'Use apply_patch heredoc commands with container.exec for deterministic file edits.',
+    returns:
+      '{"ok": boolean, "command": string, "cwd": string, "exitCode": number, "stdout": string, "stderr": string, "stdoutTruncated": boolean, "stderrTruncated": boolean, "timedOut": boolean, "guidance"?: string, "softError"?: boolean, "softErrorKind"?: string}',
+    notes:
+      'Command runs from workspace root by default. cwd must stay inside workspace root. apply_patch heredoc commands are intercepted and applied directly by extension runtime.',
     includeByDefault: true
   }
 ];
@@ -601,23 +629,60 @@ class ExternalModelAdapter {
 
   buildQuery(state) {
     const sections = [];
-    sections.push(`User query:\n${asString(state.userQuery)}`);
+    sections.push([
+      '## USER TASK',
+      asString(state.userQuery)
+    ].join('\n'));
 
     if (asString(state.conversationSummary)) {
-      sections.push(`Conversation summary:\n${asString(state.conversationSummary)}`);
+      sections.push([
+        '## CONVERSATION SUMMARY',
+        asString(state.conversationSummary)
+      ].join('\n'));
     }
 
     if (Array.isArray(state.recentMessages) && state.recentMessages.length > 0) {
-      sections.push(`Recent messages:\n${JSON.stringify(state.recentMessages.slice(-6), null, 2)}`);
+      sections.push([
+        '## RECENT MESSAGES',
+        '```json',
+        JSON.stringify(state.recentMessages.slice(-6), null, 2),
+        '```'
+      ].join('\n'));
     }
 
     if (state.initialContext && typeof state.initialContext === 'object') {
-      sections.push(`Current context:\n${JSON.stringify(state.initialContext, null, 2)}`);
+      sections.push([
+        '## CURRENT CONTEXT',
+        'These facts are already known. Use them directly; do not call tools just to rediscover them.',
+        '```json',
+        JSON.stringify(state.initialContext, null, 2),
+        '```'
+      ].join('\n'));
     }
 
     if (Array.isArray(state.toolResults) && state.toolResults.length > 0) {
-      sections.push(`Tool results so far:\n${JSON.stringify(state.toolResults.slice(-8), null, 2)}`);
+      const observations = state.toolResults.slice(-8).map((result, index) => [
+        `### COMPLETED TOOL OBSERVATION ${index + 1}`,
+        `toolName: ${asString(result.toolName)}`,
+        `callId: ${asString(result.callId)}`,
+        `ok: ${result.ok === true ? 'true' : 'false'}`,
+        result.ok === true ? 'result:' : 'error:',
+        '```json',
+        JSON.stringify(result.ok === true ? result.result : { error: result.error ?? null, result: result.result ?? null }, null, 2),
+        '```'
+      ].join('\n'));
+      sections.push([
+        '## COMPLETED TOOL RESULTS',
+        'The following tool calls have ALREADY RUN. Treat each result as an observation. Do not repeat the same tool call merely to see its output.',
+        ...observations
+      ].join('\n\n'));
     }
+
+    sections.push([
+      '## NEXT ASSISTANT ACTION',
+      'If the information needed to answer is present above, answer now using only those facts.',
+      'If more information is required, emit exactly one valid tool call JSON object.'
+    ].join('\n'));
 
     return sections.join('\n\n');
   }
@@ -703,9 +768,16 @@ class ExternalModelAdapter {
 
 class ExternalContextCollector {
   currentHostEnvironment;
+  currentWorkspaceRoot;
 
   setHostEnvironment(hostEnvironment) {
     this.currentHostEnvironment = normalizeHostEnvironment(hostEnvironment);
+  }
+
+  setWorkspaceRoot(workspaceRoot) {
+    this.currentWorkspaceRoot = typeof workspaceRoot === 'string' && workspaceRoot.trim()
+      ? workspaceRoot.trim()
+      : undefined;
   }
 
   async collectInitialContext() {
@@ -713,6 +785,9 @@ class ExternalContextCollector {
       source: 'external-runtime',
       timestamp: new Date().toISOString()
     };
+    if (this.currentWorkspaceRoot) {
+      context.workspaceRoot = this.currentWorkspaceRoot;
+    }
     if (this.currentHostEnvironment) {
       context.hostEnvironment = this.currentHostEnvironment;
     }
@@ -870,19 +945,11 @@ class ExternalToolProxy {
       callId: asString(call?.callId).trim() || `external-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       args: isObjectRecord(call?.args) ? call.args : {}
     };
-    if (normalizedCall.toolName === 'workspace.proposeEdit') {
-      try {
-        return await this.runLegacyProposeEditCompatibility(normalizedCall);
-      } catch (error) {
-        return this.toToolFailure(normalizedCall, error);
-      }
-    }
-    if (normalizedCall.toolName === 'workspace.applyProposedEdit') {
-      try {
-        return await this.runLegacyApplyProposedEditCompatibility(normalizedCall);
-      } catch (error) {
-        return this.toToolFailure(normalizedCall, error);
-      }
+    if (typeof this.runtimeContext.executeToolCall !== 'function') {
+      return this.toToolFailure(
+        normalizedCall,
+        new Error('External agent runtime requires host-side executeToolCall support.')
+      );
     }
     return this.runtimeContext.executeToolCall(normalizedCall);
   }
@@ -916,6 +983,7 @@ function toPositiveInteger(value, fallback) {
   return parsed;
 }
 
+
 function createAgentRuntime(runtimeContext) {
   const contextCollector = new ExternalContextCollector();
   const loop = new AgentLoop(
@@ -939,6 +1007,7 @@ function createAgentRuntime(runtimeContext) {
   return {
     runTurn: (request, hooks) => {
       contextCollector.setHostEnvironment(request?.hostEnvironment);
+      contextCollector.setWorkspaceRoot(runtimeContext?.workspaceRoot ?? process.env.WORKSPACE_ROOT);
       const normalizedHooks = normalizeHooks({
         ...hooks,
         reportStatus: runtimeContext?.reportStatus

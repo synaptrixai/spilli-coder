@@ -11,13 +11,13 @@ const shared = require('../tools/agent-tooling/shared');
 const containerTools = require('../tools/agent-tooling/tools/containerTools').default;
 const { applyPatchFromText } = require('../tools/agent-tooling/applyPatchCore');
 
-test('legacy workspace.proposeEdit compatibility applies edit immediately', async () => {
+test('workspace.proposeEdit is proxied to the host-side extension tool runtime', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'spilli-compat-'));
   const filePath = path.join(workspaceRoot, 'LaunchCheckList.md');
   await fs.writeFile(filePath, 'Line 1\n[]\n', 'utf8');
 
   let modelCalls = 0;
-  let forwardedCalls = 0;
+  const forwardedCalls = [];
   const runtime = createAgentRuntime({
     workspaceRoot,
     runModel: async () => {
@@ -41,12 +41,12 @@ test('legacy workspace.proposeEdit compatibility applies edit immediately', asyn
       return { raw: 'done', content: 'done', isHarmony: false };
     },
     executeToolCall: async call => {
-      forwardedCalls += 1;
+      forwardedCalls.push(call);
       return {
         callId: call.callId,
         toolName: call.toolName,
         ok: true,
-        result: { forwarded: true }
+        result: { applied: true, forwarded: true }
       };
     }
   });
@@ -54,8 +54,108 @@ test('legacy workspace.proposeEdit compatibility applies edit immediately', asyn
   await runtime.runTurn({ query: 'insert X in []', model: 'test-model' }, {});
   const updated = await fs.readFile(filePath, 'utf8');
 
-  assert.equal(updated, 'Line 1\n[X]\n');
-  assert.equal(forwardedCalls, 0);
+  assert.equal(updated, 'Line 1\n[]\n');
+  assert.equal(forwardedCalls.length, 1);
+  assert.equal(forwardedCalls[0].toolName, 'workspace.proposeEdit');
+  assert.deepEqual(forwardedCalls[0].args, {
+    file: 'LaunchCheckList.md',
+    startLine: 2,
+    startCharacter: 1,
+    endLine: 2,
+    endCharacter: 1,
+    replacement: 'X'
+  });
+});
+
+test('agent prompt advertises host-side default extension tools', async () => {
+  let capturedPrompt = '';
+  const runtime = createAgentRuntime({
+    runModel: async () => ({ raw: 'done', content: 'done', isHarmony: false }),
+    executeToolCall: async call => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ok: true,
+      result: null
+    })
+  });
+
+  await runtime.runTurn({ query: 'inspect context', model: 'test-model' }, {
+    onModelRequest: payload => {
+      capturedPrompt = payload.prompt;
+    }
+  });
+
+  assert.match(capturedPrompt, /ide\.getActiveEditorContext/);
+  assert.match(capturedPrompt, /workspace\.readFile/);
+  assert.match(capturedPrompt, /workspace\.proposeEdit/);
+  assert.match(capturedPrompt, /container\.exec/);
+});
+
+test('agent query includes host-provided workspaceRoot in current context', async () => {
+  let capturedQuery = '';
+  const runtime = createAgentRuntime({
+    workspaceRoot: '/tmp/spilli-test-workspace',
+    runModel: async payload => {
+      capturedQuery = payload.query;
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    executeToolCall: async call => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ok: true,
+      result: null
+    })
+  });
+
+  await runtime.runTurn({ query: 'where is the workspace?', model: 'test-model' }, {});
+
+  assert.ok(capturedQuery.includes('"workspaceRoot": "/tmp/spilli-test-workspace"'));
+});
+
+test('completed tool results are presented as explicit observations', async () => {
+  let modelCalls = 0;
+  let secondQuery = '';
+  const runtime = createAgentRuntime({
+    workspaceRoot: '/tmp/spilli-test-workspace',
+    runModel: async payload => {
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        return {
+          raw: JSON.stringify({
+            toolName: 'container.exec',
+            callId: 'pwd-call',
+            args: { cmd: ['bash', '-lc', 'pwd'] }
+          }),
+          content: JSON.stringify({
+            toolName: 'container.exec',
+            callId: 'pwd-call',
+            args: { cmd: ['bash', '-lc', 'pwd'] }
+          }),
+          isHarmony: false
+        };
+      }
+      secondQuery = payload.query;
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    executeToolCall: async call => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ok: true,
+      result: {
+        ok: true,
+        command: 'pwd',
+        cwd: '/tmp/spilli-test-workspace',
+        stdout: '/tmp/spilli-test-workspace\n'
+      }
+    })
+  });
+
+  await runtime.runTurn({ query: 'what is the current workspace path?', model: 'test-model' }, {});
+
+  assert.match(secondQuery, /## COMPLETED TOOL RESULTS/);
+  assert.match(secondQuery, /COMPLETED TOOL OBSERVATION 1/);
+  assert.match(secondQuery, /The following tool calls have ALREADY RUN/);
+  assert.match(secondQuery, /\/tmp\/spilli-test-workspace/);
 });
 
 test('invalid markdown json tool payload is ignored instead of executing empty container.exec', async () => {

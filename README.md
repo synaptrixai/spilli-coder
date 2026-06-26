@@ -8,7 +8,7 @@ This agent is designed to run through the SpiLLI VS Code extension, which provid
 
 - A working external coding-agent loop (`agentLoop.js`)
 - A SpiLLI agent manifest (`spilli-agent.json`)
-- Tool entrypoints for workspace/IDE/container-style operations
+- Host-side workspace/IDE/container tool compatibility through the SpiLLI extension runtime
 - A practical baseline you can fork and customize for your own agent
 
 ## Quick Start (Use This Agent)
@@ -27,11 +27,21 @@ This agent is designed to run through the SpiLLI VS Code extension, which provid
    - Set your own `agent.name` and `agent.description`
    - Keep `agent.loopEntry` pointing to your runtime entry file
 3. Customize your agent behavior in `agentLoop.js` (or your own loop entry file).
-4. If needed, add or replace local tool modules and list them in `localToolEntries`.
+4. If needed, add custom agent-only tool modules and list them in `localToolEntries`.
 5. Push your fork to GitHub.
 6. In SpiLLI extension **Manage Agents**, install your fork URL and activate it.
 
-## Adding New Tools
+## Tool Runtime Model
+
+Built-in coding tools such as `ide.getActiveEditorContext`, `workspace.readFile`,
+`workspace.proposeEdit`, and `container.exec` run on the VS Code extension host side.
+The external agent calls them through the runtime SDK via `context.executeToolCall(...)`;
+do not duplicate those built-ins in `localToolEntries`.
+
+Use `localToolEntries` only for extra agent-specific tools that are not already provided
+by `src/agent/tooling` in the extension.
+
+## Adding New Local Tools
 
 To add custom tools, use this pattern:
 
@@ -78,13 +88,10 @@ module.exports = {
 };
 ```
 
-Then add to manifest:
+Then add only your custom module to the manifest:
 
 ```json
 "localToolEntries": [
-  "tools/agent-tooling/tools/ideTools.js",
-  "tools/agent-tooling/tools/workspaceTools.js",
-  "tools/agent-tooling/tools/containerTools.js",
   "tools/myTools.js"
 ]
 ```
@@ -108,7 +115,8 @@ Repository constraints:
 - `spilli-agent.json` must remain valid.
 - Keep or correctly update: `agent.id`, `agent.name`, `agent.description`, `agent.loopEntry`, and `localToolEntries`.
 - Implement behavior changes primarily in `agentLoop.js` (or the file referenced by `agent.loopEntry`).
-- For new tools, create a local tool module with proper contract + invoke implementation, then register it in `localToolEntries`.
+- For new agent-specific tools, create a local tool module with proper contract + invoke implementation, then register it in `localToolEntries`.
+- Do not register duplicated built-in extension tools from `src/agent/tooling`; the external runtime reaches them through the host SDK.
 - Do not add extension-internal assumptions; keep this repo self-contained as an external agent runtime.
 
 What I want from you:
@@ -136,7 +144,7 @@ Your repo should include a valid `spilli-agent.json` with:
 - `schemaVersion`
 - `runtimeApiVersion`
 - `agent.id`, `agent.name`, `agent.apiVersion`, `agent.loopEntry`
-- `localToolEntries` (when used)
+- `localToolEntries` (empty unless you add custom tools beyond the extension host-side built-ins)
 
 ## Design Goals
 
