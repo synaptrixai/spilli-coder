@@ -48,14 +48,6 @@ const DEFAULT_CONTEXT_CONTRACTS = [
     includeByDefault: true
   },
   {
-    name: 'workspace.searchText',
-    description: 'Search text across workspace files.',
-    args: '{"query": string, "maxResults"?: number}',
-    returns: '{"query": string, "results": Array<{file, line, preview}>, "count": number}',
-    notes: 'search result line values are 1-based.',
-    includeByDefault: true
-  },
-  {
     name: 'workspace.readFile',
     description: 'Read file contents with optional line ranges.',
     args:

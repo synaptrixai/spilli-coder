@@ -16,7 +16,7 @@ const TOOL_USAGE_RULES = [
     '- Always put tool arguments inside the "args" object.',
     '- Do not emit non-JSON argument payloads.',
     '- Do not invent alternate key names when a key is listed above.',
-    '- Use fully-qualified tool names from the contracts (for example "workspace.searchText").',
+    '- Use fully-qualified tool names from the contracts (for example "workspace.readFile").',
     '- If Current context includes "workspaceRoot", treat it as the authoritative workspace path; do not call container.exec just to run pwd.',
     '- Never invent file names, paths, or tool outputs in the final response. Summarize only facts present in Current context or successful tool results; if output is truncated, say so.',
     '- Use workspace-relative paths when possible (for example "package.json"), but absolute paths are supported.',
@@ -405,7 +405,7 @@ class AgentLoop {
                         consecutiveRepeatedFailures = 1;
                     }
                     if (consecutiveRepeatedFailures >= repeatedFailureLimit) {
-                        const guidance = 'Agent loop stopped after repeated identical tool failures. Switch to available workspace tools (for example workspace.readFile, workspace.searchText, container.exec) instead of retrying the same unavailable tool.';
+                        const guidance = 'Agent loop stopped after repeated identical tool failures. Switch to available workspace tools (for example workspace.readFile or container.exec) instead of retrying the same unavailable tool.';
                         state.toolResults.push({
                             callId: 'agent:repeated-tool-failure',
                             toolName: 'agent.loop',

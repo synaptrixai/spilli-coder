@@ -118,56 +118,6 @@ const workspaceTools = {
     tools: [
         {
             contract: {
-                name: 'workspace.searchText',
-                description: 'Search text across workspace files.',
-                args: '{"query": string, "maxResults"?: number}',
-                returns: '{"query": string, "results": Array<{file, line, preview}>, "count": number}',
-                notes: 'search result line values are 1-based.',
-                includeByDefault: true,
-                keywords: ['search', 'find text', 'grep', 'workspace', 'searchText', 'ide.searchText']
-            },
-            createTool: context => (0, shared_1.createTool)('workspace.searchText', async (input) => {
-                if (typeof input.query !== 'string' || input.query.trim().length === 0) {
-                    throw new Error('workspace.searchText requires a non-empty query string.');
-                }
-                const requestedMax = typeof input.maxResults === 'number' && Number.isInteger(input.maxResults) && input.maxResults > 0
-                    ? input.maxResults
-                    : context.maxSearchResults;
-                const maxResults = Math.min(requestedMax, context.maxSearchResults);
-                const results = [];
-                const files = await vscode.workspace.findFiles('**/*', '**/{node_modules,.git,out}/**', 500);
-                const query = input.query;
-                for (const file of files) {
-                    if (results.length >= maxResults) {
-                        break;
-                    }
-                    try {
-                        const bytes = await vscode.workspace.fs.readFile(file);
-                        const text = Buffer.from(bytes).toString('utf8');
-                        const lines = text.split(/\r?\n/);
-                        for (let i = 0; i < lines.length; i += 1) {
-                            if (!lines[i].includes(query)) {
-                                continue;
-                            }
-                            results.push({
-                                file: file.fsPath,
-                                line: i + 1,
-                                preview: lines[i].trim()
-                            });
-                            if (results.length >= maxResults) {
-                                break;
-                            }
-                        }
-                    }
-                    catch {
-                        // Ignore unreadable/binary files.
-                    }
-                }
-                return JSON.stringify({ query: input.query, results, count: results.length });
-            })
-        },
-        {
-            contract: {
                 name: 'workspace.readFile',
                 description: 'Read file contents with optional line ranges.',
                 args: '{"file": string} OR {"path": string} OR {"filePath": string}; optional range args: {"startLine": number, "endLine": number} OR {"line": number, "count": number} OR {"startLine": number, "count": number}',
@@ -202,7 +152,7 @@ const workspaceTools = {
                         guidance: suggestions.length > 0
                             ? 'The requested path was not found. Use one of the suggested workspace-relative paths in a follow-up workspace.readFile call.'
                             : pathInsideWorkspace
-                                ? 'The requested path was not found in the workspace. Use workspace.searchText or try a different workspace-relative path.'
+                                ? 'The requested path was not found in the workspace. Use container.exec with rg/find or try a different workspace-relative path.'
                                 : 'The requested external path was not found or could not be read.',
                         suggestions
                     });

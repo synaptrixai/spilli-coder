@@ -291,7 +291,7 @@ test('adjacent json tool envelopes followed by prose are parsed as tool calls', 
       if (modelCalls === 1) {
         const raw =
           '{"toolName":"ide.getActiveEditorContext","callId":"call1","args":{}}' +
-          '{"toolName":"workspace.searchText","callId":"call2","args":{"query":"\\"name\\"","maxResults":20}}' +
+          '{"toolName":"workspace.readFile","callId":"call2","args":{"file":"package.json","line":1}}' +
           'I will inspect the workspace first.';
         return { raw, content: raw, isHarmony: false };
       }
@@ -314,9 +314,9 @@ test('adjacent json tool envelopes followed by prose are parsed as tool calls', 
   assert.equal(forwardedCalls[0].toolName, 'ide.getActiveEditorContext');
   assert.equal(forwardedCalls[0].callId, 'call1');
   assert.deepEqual(forwardedCalls[0].args, {});
-  assert.equal(forwardedCalls[1].toolName, 'workspace.searchText');
+  assert.equal(forwardedCalls[1].toolName, 'workspace.readFile');
   assert.equal(forwardedCalls[1].callId, 'call2');
-  assert.deepEqual(forwardedCalls[1].args, { query: '"name"', maxResults: 20 });
+  assert.deepEqual(forwardedCalls[1].args, { file: 'package.json', line: 1 });
 });
 
 test('agent runtime prefers extension parseToolCalls helper when available', async () => {
@@ -376,8 +376,8 @@ test('agent runtime falls back to local parser when extension helper fails', asy
       modelCalls += 1;
       if (modelCalls === 1) {
         return {
-          raw: '{"toolName":"workspace.searchText","callId":"fallback-call","args":{"query":"fallback"}}',
-          content: '{"toolName":"workspace.searchText","callId":"fallback-call","args":{"query":"fallback"}}',
+          raw: '{"toolName":"workspace.readFile","callId":"fallback-call","args":{"file":"package.json"}}',
+          content: '{"toolName":"workspace.readFile","callId":"fallback-call","args":{"file":"package.json"}}',
           isHarmony: false
         };
       }
@@ -402,9 +402,9 @@ test('agent runtime falls back to local parser when extension helper fails', asy
 
   assert.equal(parseRequests, 2);
   assert.equal(forwardedCalls.length, 1);
-  assert.equal(forwardedCalls[0].toolName, 'workspace.searchText');
+  assert.equal(forwardedCalls[0].toolName, 'workspace.readFile');
   assert.equal(forwardedCalls[0].callId, 'fallback-call');
-  assert.deepEqual(forwardedCalls[0].args, { query: 'fallback' });
+  assert.deepEqual(forwardedCalls[0].args, { file: 'package.json' });
 });
 
 test('agent runtime reports background status through hooks while model and tools run', async () => {
