@@ -619,30 +619,16 @@ class ExternalModelAdapter {
     this.runtimeContext = runtimeContext;
   }
 
-  buildQuery(state) {
+  buildQuery(state, iteration = 0) {
     const sections = [];
-    sections.push([
-      '## USER TASK',
-      asString(state.userQuery)
-    ].join('\n'));
-
-    if (asString(state.conversationSummary)) {
+    if (iteration === 0) {
       sections.push([
-        '## CONVERSATION SUMMARY',
-        asString(state.conversationSummary)
+        '## USER TASK',
+        asString(state.userQuery)
       ].join('\n'));
     }
 
-    if (Array.isArray(state.recentMessages) && state.recentMessages.length > 0) {
-      sections.push([
-        '## RECENT MESSAGES',
-        '```json',
-        JSON.stringify(state.recentMessages.slice(-6), null, 2),
-        '```'
-      ].join('\n'));
-    }
-
-    if (state.initialContext && typeof state.initialContext === 'object') {
+    if (iteration === 0 && state.initialContext && typeof state.initialContext === 'object') {
       sections.push([
         '## CURRENT CONTEXT',
         'These facts are already known. Use them directly; do not call tools just to rediscover them.',
@@ -652,8 +638,8 @@ class ExternalModelAdapter {
       ].join('\n'));
     }
 
-    if (Array.isArray(state.toolResults) && state.toolResults.length > 0) {
-      const observations = state.toolResults.slice(-8).map((result, index) => [
+    if (iteration > 0 && Array.isArray(state.modelDeltaResults) && state.modelDeltaResults.length > 0) {
+      const observations = state.modelDeltaResults.map((result, index) => [
         `### COMPLETED TOOL OBSERVATION ${index + 1}`,
         `toolName: ${asString(result.toolName)}`,
         `callId: ${asString(result.callId)}`,
@@ -664,8 +650,8 @@ class ExternalModelAdapter {
         '```'
       ].join('\n'));
       sections.push([
-        '## COMPLETED TOOL RESULTS',
-        'The following tool calls have ALREADY RUN. Treat each result as an observation. Do not repeat the same tool call merely to see its output.',
+        '## NEW TOOL RESULTS',
+        'These tool calls completed after the preceding assistant action. Earlier task, model, and tool history is already in SpiLLIHost; continue without requesting it again.',
         ...observations
       ].join('\n\n'));
     }
@@ -696,7 +682,7 @@ class ExternalModelAdapter {
 
   async runOnce(args) {
     const prompt = asString(args.state.systemPrompt);
-    const query = this.buildQuery(args.state);
+    const query = this.buildQuery(args.state, args.iteration);
 
     if (typeof args.onModelRequest === 'function') {
       args.onModelRequest({

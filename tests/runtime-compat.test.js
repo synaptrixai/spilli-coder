@@ -152,10 +152,11 @@ test('completed tool results are presented as explicit observations', async () =
 
   await runtime.runTurn({ query: 'what is the current workspace path?', model: 'test-model' }, {});
 
-  assert.match(secondQuery, /## COMPLETED TOOL RESULTS/);
+  assert.match(secondQuery, /## NEW TOOL RESULTS/);
   assert.match(secondQuery, /COMPLETED TOOL OBSERVATION 1/);
-  assert.match(secondQuery, /The following tool calls have ALREADY RUN/);
+  assert.match(secondQuery, /Earlier task, model, and tool history is already in SpiLLIHost/);
   assert.match(secondQuery, /\/tmp\/spilli-test-workspace/);
+  assert.doesNotMatch(secondQuery, /## USER TASK/);
 });
 
 test('invalid markdown json tool payload is ignored instead of executing empty container.exec', async () => {

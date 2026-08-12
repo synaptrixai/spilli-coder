@@ -38,6 +38,12 @@ Built-in coding tools such as `ide.getActiveEditorContext`, `workspace.readFile`
 The external agent calls them through the runtime SDK via `context.executeToolCall(...)`;
 do not duplicate those built-ins in `localToolEntries`.
 
+## Conversation Context
+
+The extension treats a SpiLLI SDK session as a reusable network/model allocation and uses `spilli_context.context_id` to isolate chat histories in SpiLLIHost. This agent sends the current task and workspace facts only on the first model call of a turn. Later calls contain only tool results completed since the preceding model call; they do not replay the original task, conversation summaries, recent messages, or older tool results.
+
+Fresh sessions, resource switches, resets, and host context misses are hydrated by the extension from the authoritative chat snapshot. Strict continuations are sent as deltas. Main chats and sub-agents may share an allocation, but each must retain the distinct context identity and revision supplied by the extension; this runtime does not keep a model-global transcript.
+
 Use `localToolEntries` only for extra agent-specific tools that are not already provided
 by `src/agent/tooling` in the extension.
 

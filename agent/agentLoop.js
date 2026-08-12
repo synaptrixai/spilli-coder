@@ -284,8 +284,7 @@ class AgentLoop {
             userQuery: request.query,
             initialContext,
             toolResults: [],
-            conversationSummary: request.conversationSummary,
-            recentMessages: request.recentMessages ?? []
+            modelDeltaResults: []
         };
         let finalRaw = '';
         let finalDisplay = '';
@@ -348,6 +347,7 @@ class AgentLoop {
                         result: null,
                         error: completionIssue
                     });
+                    state.modelDeltaResults = [state.toolResults[state.toolResults.length - 1]];
                     continue;
                 }
                 callbacks.onStatus?.({
@@ -362,6 +362,7 @@ class AgentLoop {
                 };
             }
             completionRequirementRetries = 0;
+            const completedToolResults = [];
             for (let callIndex = 0; callIndex < run.toolCalls.length; callIndex += 1) {
                 const call = run.toolCalls[callIndex];
                 callbacks.onStatus?.({
@@ -387,6 +388,7 @@ class AgentLoop {
                 }
                 callbacks.onToolResult(result);
                 state.toolResults.push(result);
+                completedToolResults.push(result);
                 callbacks.onStatus?.({
                     phase: result.ok ? 'working' : 'error',
                     message: result.ok ? 'Tool result received.' : 'Tool returned an error.',
@@ -434,6 +436,7 @@ class AgentLoop {
                     state.systemPrompt = this.buildSystemPrompt(request, completionRequirements);
                 }
             }
+            state.modelDeltaResults = completedToolResults;
         }
         if (hasIterationLimit) {
             state.toolResults.push({
