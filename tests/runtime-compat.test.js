@@ -11,6 +11,52 @@ const shared = require('../tools/agent-tooling/shared');
 const containerTools = require('../tools/agent-tooling/tools/containerTools').default;
 const { applyPatchFromText } = require('../tools/agent-tooling/applyPatchCore');
 
+test('model iterations send only fresh tool observations after the initial context', async () => {
+  const queries = [];
+  const prompts = [];
+  const contentPayloads = [];
+  let modelCalls = 0;
+  const runtime = createAgentRuntime({
+    runModel: async request => {
+      queries.push(request.query);
+      prompts.push(request.prompt);
+      contentPayloads.push(request.content);
+      modelCalls += 1;
+      if (modelCalls === 1) {
+        const raw = JSON.stringify({
+          toolName: 'workspace.readFile',
+          callId: 'read-1',
+          args: { file: 'src/example.ts' }
+        });
+        return { raw, content: raw, isHarmony: false };
+      }
+      return { raw: 'done', content: 'done', isHarmony: false };
+    },
+    executeToolCall: async call => ({
+      callId: call.callId,
+      toolName: call.toolName,
+      ok: true,
+      result: { text: 'fresh tool output' }
+    })
+  });
+
+  await runtime.runTurn({
+    query: 'original task that must not be repeated',
+    model: 'test-model',
+    hostEnvironment: { platform: 'test-platform' }
+  }, {});
+
+  assert.equal(queries.length, 2);
+  assert.match(queries[0], /original task that must not be repeated/);
+  assert.match(queries[0], /test-platform/);
+  assert.match(queries[1], /NEW TOOL RESULTS/);
+  assert.match(queries[1], /fresh tool output/);
+  assert.doesNotMatch(queries[1], /original task that must not be repeated/);
+  assert.doesNotMatch(queries[1], /test-platform/);
+  assert.equal(prompts[1], prompts[0]);
+  assert.deepEqual(contentPayloads, [undefined, []]);
+});
+
 test('workspace.proposeEdit is proxied to the host-side extension tool runtime', async () => {
   const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'spilli-compat-'));
   const filePath = path.join(workspaceRoot, 'LaunchCheckList.md');

@@ -432,9 +432,9 @@ class AgentLoop {
                     lastFailureSignature = undefined;
                     consecutiveRepeatedFailures = 0;
                 }
-                if (result.ok && effectiveToolName === 'tools.enableTools') {
-                    state.systemPrompt = this.buildSystemPrompt(request, completionRequirements);
-                }
+                // Contract discovery and enablement are already returned in the
+                // next model delta. Keep the system prefix byte-stable so the
+                // host can reuse its retained KV prefix throughout the turn.
             }
             state.modelDeltaResults = completedToolResults;
         }

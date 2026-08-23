@@ -683,6 +683,7 @@ class ExternalModelAdapter {
   async runOnce(args) {
     const prompt = asString(args.state.systemPrompt);
     const query = this.buildQuery(args.state, args.iteration);
+    const isIncremental = args.iteration > 0;
 
     if (typeof args.onModelRequest === 'function') {
       args.onModelRequest({
@@ -701,6 +702,7 @@ class ExternalModelAdapter {
     const run = await this.runtimeContext.runModel({
       prompt,
       query,
+      content: isIncremental ? [] : undefined,
       model: args.model,
       scope: args.scope,
       team: args.team
